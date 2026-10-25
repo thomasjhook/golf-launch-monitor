@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shot-service
+  labels:
+    app: shot-service
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate   # RWO volume: avoid two pods mounting it during rollout
+  selector:
+    matchLabels:
+      app: shot-service
+  template:
+    metadata:
+      labels:
+        app: shot-service
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: shot-service
+          image: launch-monitor/shot-service:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: grpc
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: shot-service-config
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef: { name: postgres-credentials, key: password }
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { cpu: "1", memory: 256Mi }
+          # Native gRPC probes (grpc.health.v1) need Kubernetes >= 1.24.
+          readinessProbe:
+            grpc: { port: 8080, service: launchmonitor.v1.ShotService }
+            periodSeconds: 5
+          livenessProbe:
+            grpc: { port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: shot-data

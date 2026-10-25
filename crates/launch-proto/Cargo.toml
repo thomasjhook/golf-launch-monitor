@@ -1,0 +1,21 @@
+[package]
+name = "launch-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[dependencies]
+launch-types = { workspace = true }
+calibration = { workspace = true }
+launch-core = { path = "../launch-core" }
+vision = { workspace = true }
+prost = "0.14"
+tonic = "0.14"
+tonic-prost = "0.14"
+
+[build-dependencies]
+protox = "0.10"
+prost = "0.14"
+tonic-prost-build = "0.14"

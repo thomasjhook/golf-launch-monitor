@@ -1,0 +1,13 @@
+[package]
+name = "capture-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+launch-types = { workspace = true }
+vision = { workspace = true }
+serde = { workspace = true, features = ["std"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

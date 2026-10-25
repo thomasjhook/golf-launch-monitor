@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package launchmonitor.v1;
+
+// Units are SI unless a field name says otherwise (*_deg, *_rpm, *_us).
+// World frame: +X downrange, +Y up, +Z to the golfer's right. See
+// crates/launch-types/src/lib.rs for the full conventions.
+
+message Vec3 {
+  double x = 1;
+  double y = 2;
+  double z = 3;
+}
+
+// Pinhole intrinsics with Brown-Conrady distortion.
+message Intrinsics {
+  uint32 width = 1;
+  uint32 height = 2;
+  double fx = 3;
+  double fy = 4;
+  double cx = 5;
+  double cy = 6;
+  // Exactly 5 values: k1, k2, p1, p2, k3 (OpenCV ordering).
+  repeated double distortion = 7;
+}
+
+// Rigid transform camera -> world: p_world = R * p_cam + t.
+message CameraPose {
+  // Row-major 3x3 rotation; exactly 9 values.
+  repeated double rotation = 1;
+  Vec3 translation_m = 2;
+}
+
+message Calibration {
+  Intrinsics intrinsics = 1;
+  CameraPose pose = 2;
+}
+
+// 8-bit grayscale image, row-major.
+message GrayFrame {
+  uint32 width = 1;
+  uint32 height = 2;
+  // Exactly width * height bytes.
+  bytes data = 3;
+}
+
+// Strobe timing for one shot as reported by the firmware.
+message StrobeTiming {
+  uint32 shot_id = 1;
+  // Flash times in microseconds relative to flash 0 (so the first is 0).
+  repeated uint32 pulse_times_us = 2;
+}
+
+message LaunchConditions {
+  double ball_speed_mps = 1;
+  double launch_angle_deg = 2;
+  // Positive = to the right.
+  double azimuth_deg = 3;
+  double backspin_rpm = 4;
+  // Positive curves the ball to the right.
+  double sidespin_rpm = 5;
+}
+
+message TrajectoryPoint {
+  double t_s = 1;
+  Vec3 position_m = 2;
+}
+
+message FlightResult {
+  repeated TrajectoryPoint trajectory = 1;
+  double carry_m = 2;
+  double apex_height_m = 3;
+  double flight_time_s = 4;
+  double lateral_m = 5;
+  // Carry plus an approximate bounce and roll. Trust carry_m over this.
+  double total_m = 6;
+}
+
+message ShotResult {
+  uint32 shot_id = 1;
+  LaunchConditions launch = 2;
+  FlightResult flight = 3;
+}

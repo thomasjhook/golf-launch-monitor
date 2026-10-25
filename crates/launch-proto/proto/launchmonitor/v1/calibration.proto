@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package launchmonitor.v1;
+
+import "launchmonitor/v1/types.proto";
+
+// Which way the ball travels across the image, i.e. how detections sorted by
+// ascending x map to flash order. Depends on where the camera is mounted.
+enum FlashOrder {
+  FLASH_ORDER_UNSPECIFIED = 0;
+  // Flash 0 is the left-most ball image.
+  FLASH_ORDER_X_ASCENDING = 1;
+  // Flash 0 is the right-most ball image.
+  FLASH_ORDER_X_DESCENDING = 2;
+}
+
+// Everything about the camera installation the pipeline needs.
+message CameraSetup {
+  Calibration calibration = 1;
+  FlashOrder flash_order = 2;
+}
+
+message GetSetupRequest {}
+
+service CalibrationService {
+  // NOT_FOUND until a setup has been stored.
+  rpc GetSetup(GetSetupRequest) returns (CameraSetup);
+  // Validates, stores (and persists when a data dir is configured), and
+  // returns the setup. INVALID_ARGUMENT if the calibration is malformed.
+  rpc SetSetup(CameraSetup) returns (CameraSetup);
+}

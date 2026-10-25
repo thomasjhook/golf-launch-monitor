@@ -1,0 +1,11 @@
+[package]
+name = "flight-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+launch-types = { workspace = true }
+serde = { workspace = true, features = ["std"] }
+thiserror = { workspace = true }

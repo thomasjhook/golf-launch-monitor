@@ -1,0 +1,18 @@
+[package]
+name = "launch-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+launch-types = { workspace = true }
+protocol = { workspace = true }
+calibration = { workspace = true }
+vision = { workspace = true }
+metrics = { workspace = true }
+flight-model = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+launch-sim = { path = "../launch-sim" }

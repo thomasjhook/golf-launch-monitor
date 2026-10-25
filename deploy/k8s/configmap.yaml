@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shot-service-config
+data:
+  LISTEN_ADDR: "0.0.0.0:8080"
+  RUST_LOG: "info"
+  DATA_DIR: "/data"
+  # libpq variables: shot-service connects to Postgres with these plus
+  # PGPASSWORD from the postgres-credentials Secret.
+  PGHOST: "postgres"
+  PGPORT: "5432"
+  PGUSER: "launch"
+  PGDATABASE: "launchmonitor"

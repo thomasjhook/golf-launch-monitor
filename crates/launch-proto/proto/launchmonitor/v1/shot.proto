@@ -1,0 +1,60 @@
+syntax = "proto3";
+
+package launchmonitor.v1;
+
+import "launchmonitor/v1/types.proto";
+
+message ProcessShotRequest {
+  GrayFrame frame = 1;
+  StrobeTiming timing = 2;
+}
+
+message ProcessShotResponse {
+  ShotResult result = 1;
+}
+
+message StreamShotsRequest {}
+
+// A processed shot as stored by the service.
+message StoredShot {
+  // Monotonic storage id; use it as a paging cursor.
+  int64 id = 1;
+  int64 recorded_unix_ms = 2;
+  ShotResult result = 3;
+}
+
+message ListShotsRequest {
+  // 0 selects the default (50); values above 500 are clamped.
+  uint32 page_size = 1;
+  // Return shots with id < before_id. 0 starts from the newest.
+  int64 before_id = 2;
+}
+
+message ListShotsResponse {
+  // Newest first. To fetch the next page, pass the last id as before_id; an
+  // empty list means there is nothing older.
+  repeated StoredShot shots = 1;
+}
+
+service ShotService {
+  // Run one captured frame plus strobe timing through the pipeline.
+  //
+  // Errors:
+  //   INVALID_ARGUMENT     malformed request (bad frame size, missing fields)
+  //   FAILED_PRECONDITION  no camera setup stored yet, or the shot could not
+  //                        be analysed (e.g. ball image count != flash count)
+  rpc ProcessShot(ProcessShotRequest) returns (ProcessShotResponse);
+
+  // Live results of every shot processed after the stream is opened, until
+  // the client disconnects. Slow consumers skip missed results.
+  rpc StreamShots(StreamShotsRequest) returns (stream ShotResult);
+
+  // Stored shot history, newest first. Shots are stored when processed; if
+  // the database is unavailable at that moment the shot is still returned and
+  // streamed but not stored.
+  //
+  // Errors:
+  //   INVALID_ARGUMENT  before_id < 0
+  //   UNAVAILABLE       the database cannot be reached
+  rpc ListShots(ListShotsRequest) returns (ListShotsResponse);
+}

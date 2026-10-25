@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: shot-service
+  labels:
+    app: shot-service
+spec:
+  type: ClusterIP
+  selector:
+    app: shot-service
+  ports:
+    - name: grpc
+      port: 8080
+      targetPort: grpc
+      appProtocol: kubernetes.io/h2c

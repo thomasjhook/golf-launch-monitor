@@ -1,0 +1,34 @@
+[package]
+name = "shot-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "shot_service"
+path = "src/lib.rs"
+
+[[bin]]
+name = "shot-service"
+path = "src/main.rs"
+
+[dependencies]
+launch-types = { workspace = true }
+launch-proto = { path = "../launch-proto" }
+launch-core = { path = "../launch-core" }
+calibration = { workspace = true }
+vision = { workspace = true }
+thiserror = { workspace = true }
+prost = "0.14"
+tonic = "0.14"
+tonic-health = "0.14"
+tonic-reflection = "0.14"
+tokio = { version = "1.47.1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "fs"] }
+tokio-stream = { version = "0.1", features = ["net", "sync"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "migrate", "macros"] }
+
+[dev-dependencies]
+launch-sim = { path = "../launch-sim" }

@@ -1,0 +1,20 @@
+[package]
+name = "replay-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "lm-replay"
+path = "src/main.rs"
+
+[dependencies]
+launch-types = { workspace = true }
+launch-proto = { path = "../launch-proto" }
+launch-core = { path = "../launch-core" }
+launch-sim = { path = "../launch-sim" }
+capture-store = { path = "../capture-store" }
+clap = { version = "4", features = ["derive", "env"] }
+tokio = { version = "1.47.1", features = ["rt-multi-thread", "macros"] }
+tonic = "0.14"

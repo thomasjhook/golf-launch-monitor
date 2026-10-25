@@ -1,0 +1,12 @@
+[build]
+target = "thumbv8m.main-none-eabihf"
+
+[target.'cfg(all(target_arch = "arm", target_os = "none"))']
+# Flash/run via SWD debug probe:
+#runner = "probe-rs run --chip RP235x"
+# Or via USB with the board in BOOTSEL mode:
+#runner = "picotool load -u -v -x -t elf"
+# link.x / defmt.x are passed from build.rs (as in the upstream embassy examples).
+
+[env]
+DEFMT_LOG = "info"

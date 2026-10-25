@@ -1,0 +1,7 @@
+/target
+*.swp
+.DS_Store
+/captures
+/firmware/target
+/app/LaunchMonitor/.build
+/app/LaunchMonitor/.swiftpm
