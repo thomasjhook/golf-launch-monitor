@@ -1,6 +1,7 @@
 //! Host side of the MCU wire protocol (COBS-framed postcard over a byte stream).
 
 use std::collections::VecDeque;
+use std::future::Future;
 use std::time::Duration;
 
 use protocol::frame::{self, FrameDecoder, MAX_FRAME_LEN};
@@ -91,14 +92,57 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> McuLink<T> {
     }
 }
 
+/// Source of MCU links, called again after the link is lost.
+pub trait LinkConnector: Send {
+    type Io: AsyncRead + AsyncWrite + Unpin + Send;
+
+    fn connect(&mut self) -> impl Future<Output = Result<McuLink<Self::Io>>> + Send;
+}
+
+/// Reopens a serial device path each time. The path should be stable across
+/// replugs (see `deploy/systemd/99-launch-monitor.rules`).
+pub struct SerialConnector {
+    path: String,
+}
+
+impl SerialConnector {
+    pub fn new(path: impl Into<String>) -> Self {
+        Self { path: path.into() }
+    }
+}
+
+impl LinkConnector for SerialConnector {
+    type Io = tokio_serial::SerialStream;
+
+    async fn connect(&mut self) -> Result<McuLink<Self::Io>> {
+        connect_serial(&self.path)
+    }
+}
+
+/// Hands out one link, then reports it as lost: no reconnecting.
+pub struct OneShot<T>(pub Option<McuLink<T>>);
+
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> LinkConnector for OneShot<T> {
+    type Io = T;
+
+    async fn connect(&mut self) -> Result<McuLink<T>> {
+        self.0.take().ok_or(Error::LinkClosed)
+    }
+}
+
 /// Open a USB CDC serial port. USB CDC ignores the baud rate; 115200 is used.
+/// The open fails if the device is absent or already held by another process
+/// (the port is opened exclusively).
 ///
-/// NOTE: compiles but is untested without a device.
+/// NOTE: untested without a device.
 pub fn connect_serial(path: &str) -> Result<McuLink<tokio_serial::SerialStream>> {
     use tokio_serial::SerialPortBuilderExt;
-    let port = tokio_serial::new(path, 115_200)
+    let mut port = tokio_serial::new(path, 115_200)
         .open_native_async()
         .map_err(|e| Error::Io(std::io::Error::other(format!("open {path}: {e}"))))?;
+    // The firmware blocks in `wait_connection` until the host asserts DTR.
+    tokio_serial::SerialPort::write_data_terminal_ready(&mut port, true)
+        .map_err(|e| Error::Io(std::io::Error::other(format!("DTR on {path}: {e}"))))?;
     Ok(McuLink::new(port))
 }
 

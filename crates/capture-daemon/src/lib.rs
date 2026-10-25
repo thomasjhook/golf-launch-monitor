@@ -2,8 +2,8 @@
 //!
 //! Real hardware is not available yet; `sim` provides a device running the
 //! real firmware `Sequencer` and a synthetic camera that exercise the same
-//! code paths. Known limitations: no MCU reconnect (link loss is a fatal
-//! error), no real camera backend (`Camera` is the seam), and
+//! code paths. `run_supervised` reconnects and re-arms after MCU link loss.
+//! Known limitations: no real camera backend (`Camera` is the seam), and
 //! `link::connect_serial` is untested without a device.
 
 pub mod camera;
@@ -15,6 +15,8 @@ pub mod service;
 pub mod sim;
 
 pub use camera::{Camera, CapturedFrame};
-pub use daemon::{run, DaemonConfig, DaemonEvent, EXPOSURE_MARGIN_US};
+pub use daemon::{
+    run, run_supervised, DaemonConfig, DaemonEvent, ReconnectPolicy, EXPOSURE_MARGIN_US,
+};
 pub use error::{Error, Result};
-pub use link::McuLink;
+pub use link::{LinkConnector, McuLink};

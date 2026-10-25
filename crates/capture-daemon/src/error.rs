@@ -9,7 +9,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 pub enum Error {
     #[error("MCU link I/O error: {0}")]
     Io(#[from] std::io::Error),
-    /// The MCU stream hit EOF. Reconnect logic is out of scope: the daemon exits.
+    /// The MCU stream hit EOF (e.g. the Pico was unplugged).
     #[error("MCU link closed unexpectedly")]
     LinkClosed,
     #[error("timed out waiting for MCU response to {0}")]
@@ -41,4 +41,18 @@ impl From<tonic::Status> for Error {
 /// `Code: message`, so logs and events carry the gRPC code too.
 pub fn fmt_status(s: &tonic::Status) -> String {
     format!("{:?}: {}", s.code(), s.message())
+}
+
+impl Error {
+    /// True for failures of the MCU link itself (as opposed to bad config, a
+    /// dead camera, ...), which a fresh connection may fix.
+    pub fn is_link_failure(&self) -> bool {
+        matches!(
+            self,
+            Error::Io(_)
+                | Error::LinkClosed
+                | Error::Timeout(_)
+                | Error::ConfigRejected(ConfigError::Busy)
+        )
+    }
 }

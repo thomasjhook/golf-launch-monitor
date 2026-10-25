@@ -14,7 +14,7 @@ use tokio::task::JoinSet;
 
 use crate::camera::{Camera, CapturedFrame};
 use crate::error::{fmt_status, Error, Result};
-use crate::link::McuLink;
+use crate::link::{LinkConnector, McuLink, OneShot};
 use crate::pairing::{Pairer, Pairing, DEFAULT_MAX_AGE};
 use crate::service::ShotUploader;
 
@@ -74,6 +74,12 @@ pub enum DaemonEvent {
         shot_id: u32,
     },
     LinkError(String),
+    /// About to retry the MCU connection after `delay` (attempt 1 is the
+    /// first retry after a loss; it grows while retries keep failing).
+    Reconnecting {
+        attempt: u32,
+        delay: Duration,
+    },
 }
 
 type Events = mpsc::UnboundedSender<DaemonEvent>;
@@ -83,12 +89,10 @@ fn emit(events: &Events, ev: DaemonEvent) {
     let _ = events.send(ev);
 }
 
-async fn startup<T, C>(link: &mut McuLink<T>, camera: &mut C, cfg: &DaemonConfig) -> Result<u32>
+async fn startup<T>(link: &mut McuLink<T>, cfg: &DaemonConfig) -> Result<()>
 where
     T: AsyncRead + AsyncWrite + Unpin + Send,
-    C: Camera,
 {
-    cfg.strobe.validate().map_err(Error::InvalidConfig)?;
     let t = cfg.mcu_timeout;
 
     let status = link
@@ -116,22 +120,45 @@ where
         other => return Err(Error::ConfigMismatch(other)),
     }
 
-    let exposure_us = cfg.exposure_us();
-    camera.set_exposure_us(exposure_us).await?;
     link.request(HostToDevice::Arm, t, "Arm", |m| {
         matches!(m, DeviceToHost::Armed)
     })
     .await?;
-    tracing::info!(exposure_us, "armed");
-    Ok(exposure_us)
+    tracing::info!(exposure_us = cfg.exposure_us(), "armed");
+    Ok(())
 }
 
-/// Run until `shutdown` resolves (graceful: disarms) or a fatal error occurs.
-/// If the MCU link closes unexpectedly this returns `Error::LinkClosed`;
-/// reconnecting is out of scope.
+/// Backoff between attempts to (re)establish the MCU link: doubles from
+/// `initial` up to `max`, and starts over after a successful startup.
+#[derive(Debug, Clone)]
+pub struct ReconnectPolicy {
+    pub initial: Duration,
+    pub max: Duration,
+}
+
+impl Default for ReconnectPolicy {
+    fn default() -> Self {
+        Self {
+            initial: Duration::from_millis(250),
+            max: Duration::from_secs(5),
+        }
+    }
+}
+
+impl ReconnectPolicy {
+    fn delay(&self, attempt: u32) -> Duration {
+        self.initial
+            .saturating_mul(2u32.saturating_pow(attempt.saturating_sub(1)))
+            .min(self.max)
+    }
+}
+
+/// Run on a single, already-open link until `shutdown` resolves (graceful:
+/// disarms) or a fatal error occurs. If the MCU link closes unexpectedly this
+/// returns `Error::LinkClosed`; see `run_supervised` for reconnecting.
 pub async fn run<T, C>(
-    mut link: McuLink<T>,
-    mut camera: C,
+    link: McuLink<T>,
+    camera: C,
     uploader: ShotUploader,
     cfg: DaemonConfig,
     events: Events,
@@ -141,7 +168,41 @@ where
     T: AsyncRead + AsyncWrite + Unpin + Send,
     C: Camera + 'static,
 {
-    let exposure_us = startup(&mut link, &mut camera, &cfg).await?;
+    run_supervised(
+        OneShot(Some(link)),
+        camera,
+        uploader,
+        cfg,
+        events,
+        shutdown,
+        None,
+    )
+    .await
+}
+
+/// Like `run`, but obtains the link from `connector` and, with a
+/// `reconnect` policy, reconnects and re-arms whenever the link fails (device
+/// unplugged, unresponsive, or busy), retrying forever with backoff. Without
+/// a policy any link failure is returned. Camera and configuration errors are
+/// always fatal. The camera and in-flight uploads outlive individual links.
+/// Shots in flight when the link drops are lost (reported as
+/// `FrameWithoutShot`).
+pub async fn run_supervised<K, C>(
+    mut connector: K,
+    mut camera: C,
+    uploader: ShotUploader,
+    cfg: DaemonConfig,
+    events: Events,
+    shutdown: impl Future<Output = ()>,
+    reconnect: Option<ReconnectPolicy>,
+) -> Result<()>
+where
+    K: LinkConnector,
+    C: Camera + 'static,
+{
+    cfg.strobe.validate().map_err(Error::InvalidConfig)?;
+    let exposure_us = cfg.exposure_us();
+    camera.set_exposure_us(exposure_us).await?;
 
     // `next_frame` is not cancel-safe in general, so it gets its own task.
     let (frame_tx, mut frames) = mpsc::channel::<Result<CapturedFrame>>(4);
@@ -155,15 +216,104 @@ where
         }
     });
 
-    let mut pairer: Pairer<ShotTriggered, CapturedFrame> = Pairer::new(cfg.pair_max_age);
     let mut uploads = JoinSet::new();
-    let mut expiry = tokio::time::interval(Duration::from_millis(50));
     tokio::pin!(shutdown);
-    emit(&events, DaemonEvent::Ready { exposure_us });
+    let mut attempt = 0u32;
+
+    let result: Result<()> = 'outer: loop {
+        if attempt > 0 {
+            let Some(policy) = &reconnect else {
+                unreachable!("retry without a policy")
+            };
+            let delay = policy.delay(attempt);
+            emit(&events, DaemonEvent::Reconnecting { attempt, delay });
+            tokio::select! {
+                () = &mut shutdown => break Ok(()),
+                () = tokio::time::sleep(delay) => {}
+            }
+        }
+
+        let connected = tokio::select! {
+            () = &mut shutdown => break Ok(()),
+            r = connector.connect() => r,
+        };
+        let mut link = match connected {
+            Ok(l) => l,
+            Err(e) if reconnect.is_some() && e.is_link_failure() => {
+                emit(&events, DaemonEvent::LinkError(e.to_string()));
+                attempt += 1;
+                continue;
+            }
+            Err(e) => break Err(e),
+        };
+
+        // A frame from before the (re)connect has no shot to pair with.
+        loop {
+            match frames.try_recv() {
+                Ok(Ok(_)) => emit(&events, DaemonEvent::FrameWithoutShot),
+                Ok(Err(e)) => break 'outer Err(e),
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    break 'outer Err(Error::Camera("camera task ended".into()))
+                }
+            }
+        }
+
+        let (end, was_ready) = session(
+            &mut link,
+            &mut frames,
+            &uploader,
+            &cfg,
+            &events,
+            &mut uploads,
+            exposure_us,
+            shutdown.as_mut(),
+        )
+        .await;
+        match end {
+            Ok(()) => break Ok(()),
+            Err(e) if reconnect.is_some() && e.is_link_failure() => {
+                tracing::warn!(error = %e, "MCU link lost; reconnecting");
+                // A link that came up fully restarts the backoff.
+                attempt = if was_ready { 1 } else { attempt + 1 };
+            }
+            Err(e) => break Err(e),
+        }
+    };
+
+    pump.abort();
+    // Let in-flight uploads finish so no result is lost.
+    while uploads.join_next().await.is_some() {}
+    result
+}
+
+/// One connection's lifetime: configure and arm, then pair shots with frames
+/// until shutdown or an error. The bool says whether the device got armed.
+#[allow(clippy::too_many_arguments)]
+async fn session<T, F>(
+    link: &mut McuLink<T>,
+    frames: &mut mpsc::Receiver<Result<CapturedFrame>>,
+    uploader: &ShotUploader,
+    cfg: &DaemonConfig,
+    events: &Events,
+    uploads: &mut JoinSet<()>,
+    exposure_us: u32,
+    mut shutdown: std::pin::Pin<&mut F>,
+) -> (Result<()>, bool)
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send,
+    F: Future<Output = ()>,
+{
+    if let Err(e) = startup(link, cfg).await {
+        return (Err(e), false);
+    }
+    let mut pairer: Pairer<ShotTriggered, CapturedFrame> = Pairer::new(cfg.pair_max_age);
+    let mut expiry = tokio::time::interval(Duration::from_millis(50));
+    emit(events, DaemonEvent::Ready { exposure_us });
 
     let result: Result<()> = loop {
         let pairings = tokio::select! {
-            () = &mut shutdown => break Ok(()),
+            () = shutdown.as_mut() => break Ok(()),
             msg = link.recv() => match msg {
                 Ok(DeviceToHost::Shot(shot)) => {
                     tracing::debug!(shot_id = shot.shot_id, pulses = ?shot.pulses(), "shot triggered");
@@ -174,7 +324,7 @@ where
                     continue;
                 }
                 Err(e) => {
-                    emit(&events, DaemonEvent::LinkError(e.to_string()));
+                    emit(events, DaemonEvent::LinkError(e.to_string()));
                     break Err(e);
                 }
             },
@@ -189,16 +339,19 @@ where
             _ = expiry.tick() => pairer.expire(Instant::now()),
         };
         for p in pairings {
-            handle_pairing(p, &cfg, &uploader, &events, &mut uploads);
+            handle_pairing(p, cfg, uploader, events, uploads);
         }
         // Reap finished uploads so the set doesn't grow.
         while uploads.try_join_next().is_some() {}
     };
 
-    pump.abort();
+    // Whatever is still waiting for a partner never gets one.
+    for p in pairer.expire(Instant::now() + cfg.pair_max_age + Duration::from_secs(1)) {
+        handle_pairing(p, cfg, uploader, events, uploads);
+    }
     // Best effort: leave the device disarmed even after errors (not if the
     // link itself is dead).
-    if !matches!(result, Err(Error::LinkClosed | Error::Io(_))) {
+    if !matches!(&result, Err(e) if e.is_link_failure()) {
         match link
             .request(HostToDevice::Disarm, cfg.mcu_timeout, "Disarm", |m| {
                 matches!(m, DeviceToHost::Disarmed)
@@ -209,9 +362,7 @@ where
             Err(e) => tracing::warn!(error = %e, "could not confirm disarm"),
         }
     }
-    // Let in-flight uploads finish so no result is lost.
-    while uploads.join_next().await.is_some() {}
-    result
+    (result, true)
 }
 
 fn handle_pairing(

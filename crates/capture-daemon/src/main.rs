@@ -2,7 +2,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use capture_daemon::daemon::{run, DaemonConfig, DaemonEvent};
+use capture_daemon::camera::NullCamera;
+use capture_daemon::daemon::{run, run_supervised, DaemonConfig, DaemonEvent, ReconnectPolicy};
+use capture_daemon::link::SerialConnector;
 use capture_daemon::service::{connect_lazy, install_bench_setup, RetryPolicy, ShotUploader};
 use capture_daemon::sim::{demo_truth, SimRig, SimRigConfig};
 use clap::Parser;
@@ -16,7 +18,8 @@ struct Cli {
     /// MCU backend: `sim` or `serial:/dev/cu.usbmodemXXXX`.
     #[arg(long, default_value = "sim")]
     mcu: String,
-    /// Camera backend. Only `sim` exists; a real camera is a TODO.
+    /// Camera backend: `sim`, or `none` (never delivers frames; for bringing
+    /// up a serial MCU before a real camera backend exists, see TODO).
     #[arg(long, default_value = "sim")]
     camera: String,
     #[arg(
@@ -84,30 +87,46 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn ctrl_c() {
+/// Resolves on ctrl-c or, on Unix, SIGTERM (what systemd sends on stop).
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
     let _ = tokio::signal::ctrl_c().await;
-    tracing::info!("ctrl-c received; shutting down");
+    tracing::info!("shutdown signal received; shutting down");
 }
 
 /// Ok(true) when every shot succeeded.
 async fn real_main(cli: Cli) -> Result<bool, String> {
     let mcu = parse_mcu(&cli.mcu)?;
-    if cli.camera != "sim" {
-        return Err(format!(
-            "unsupported --camera {:?}: only `sim` exists (real camera backend is a TODO)",
-            cli.camera
-        ));
+    match (&mcu, cli.camera.as_str()) {
+        (McuKind::Sim, "sim") | (McuKind::Serial(_), "none") => {}
+        (McuKind::Sim, "none") => return Err("--camera none needs --mcu serial:<path>".into()),
+        (McuKind::Serial(_), "sim") => {
+            return Err(
+                "--camera sim only works with --mcu sim; use --camera none until a real camera backend exists"
+                    .into(),
+            )
+        }
+        (_, other) => {
+            return Err(format!(
+                "unsupported --camera {other:?}: expected `sim` or `none` (real camera backend is a TODO)"
+            ))
+        }
     }
-    let McuKind::Sim = mcu else {
-        let McuKind::Serial(path) = mcu else {
-            unreachable!()
-        };
-        // capture_daemon::link::connect_serial(&path) is ready, but the only
-        // camera is the simulated one, which is driven by the simulated MCU.
-        return Err(format!(
-            "--mcu serial:{path} needs a real camera backend (TODO); --camera sim only works with --mcu sim"
-        ));
-    };
 
     let strobe = StrobeConfig {
         pulse_count: cli.pulses,
@@ -118,6 +137,9 @@ async fn real_main(cli: Cli) -> Result<bool, String> {
     strobe
         .validate()
         .map_err(|e| format!("invalid strobe flags: {e:?}"))?;
+    if let McuKind::Serial(path) = mcu {
+        return run_live(&cli, strobe, path).await;
+    }
     let rig_cfg = SimRigConfig::default();
     let min_interval_ms = u64::from(rig_cfg.lockout_us) / 1000 + 20;
     if cli.sim_interval_ms < min_interval_ms {
@@ -157,7 +179,7 @@ async fn real_main(cli: Cli) -> Result<bool, String> {
     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel();
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
     let mut daemon = tokio::spawn(run(link, camera, uploader, cfg, ev_tx, async move {
-        tokio::select! { () = ctrl_c() => {}, _ = stop_rx => {} }
+        tokio::select! { () = shutdown_signal() => {}, _ = stop_rx => {} }
     }));
 
     let n = cli.sim_shots;
@@ -202,6 +224,7 @@ async fn real_main(cli: Cli) -> Result<bool, String> {
                 Some(DaemonEvent::FrameWithoutShot) => { done += 1; ok = false; println!("     | frame without shot"); }
                 Some(DaemonEvent::ShotWithoutFrame { shot_id }) => { done += 1; ok = false; println!("{shot_id:>4} | shot without frame"); }
                 Some(DaemonEvent::LinkError(e)) => { eprintln!("link error: {e}"); ok = false; }
+                Some(DaemonEvent::Reconnecting { .. }) => {}
                 None => break None,
             },
         }
@@ -220,4 +243,59 @@ async fn real_main(cli: Cli) -> Result<bool, String> {
         Ok(Err(e)) => Err(e.to_string()),
         Err(e) => Err(format!("daemon task failed: {e}")),
     }
+}
+
+/// Real MCU over serial: run until a shutdown signal, surviving unplugs and
+/// MCU resets. Only exits non-zero on fatal (non-link) errors.
+async fn run_live(cli: &Cli, strobe: StrobeConfig, path: String) -> Result<bool, String> {
+    let channel = connect_lazy(&cli.service_addr).map_err(|e| e.to_string())?;
+    if cli.install_bench_setup {
+        install_bench_setup(channel.clone(), RetryPolicy::default())
+            .await
+            .map_err(|e| format!("installing bench setup failed: {e}"))?;
+    }
+    let uploader = ShotUploader::new(channel, RetryPolicy::default());
+    let cfg = DaemonConfig {
+        strobe,
+        captures_dir: cli.captures_dir.clone(),
+        ..DaemonConfig::default()
+    };
+    let (ev_tx, mut ev_rx) = mpsc::unbounded_channel();
+    let events = tokio::spawn(async move {
+        while let Some(ev) = ev_rx.recv().await {
+            match ev {
+                DaemonEvent::Ready { exposure_us } => tracing::info!(exposure_us, "ready"),
+                DaemonEvent::Archived { shot_id, path } => {
+                    tracing::info!(shot_id, path = %path.display(), "archived")
+                }
+                DaemonEvent::ShotProcessed(r) => {
+                    tracing::info!(shot_id = r.shot_id, "shot processed")
+                }
+                DaemonEvent::ShotFailed { shot_id, error } => {
+                    tracing::warn!(shot_id, %error, "shot failed")
+                }
+                DaemonEvent::FrameWithoutShot => tracing::warn!("frame without shot"),
+                DaemonEvent::ShotWithoutFrame { shot_id } => {
+                    tracing::warn!(shot_id, "shot without frame")
+                }
+                DaemonEvent::LinkError(e) => tracing::warn!(error = %e, "MCU link error"),
+                DaemonEvent::Reconnecting { attempt, delay } => {
+                    tracing::info!(attempt, ?delay, "reconnecting to MCU")
+                }
+            }
+        }
+    });
+    tracing::info!(%path, "starting; waiting for MCU");
+    let res = run_supervised(
+        SerialConnector::new(path),
+        NullCamera,
+        uploader,
+        cfg,
+        ev_tx,
+        shutdown_signal(),
+        Some(ReconnectPolicy::default()),
+    )
+    .await;
+    let _ = events.await;
+    res.map(|()| true).map_err(|e| e.to_string())
 }

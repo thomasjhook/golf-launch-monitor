@@ -1,0 +1,36 @@
+[Unit]
+Description=Launch monitor capture daemon
+# The daemon waits for the Pico and the network itself (it reconnects with
+# backoff), so no hard dependency on either.
+After=network-online.target
+Wants=network-online.target
+# Never give up restarting.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=launchmonitor
+SupplementaryGroups=dialout
+EnvironmentFile=/etc/launch-monitor/capture-daemon.env
+# --camera none until a real camera backend exists: shots show up as
+# "shot without frame". Captures are archived under StateDirectory.
+ExecStart=/usr/local/bin/capture-daemon \
+    --mcu serial:/dev/launch-monitor-mcu \
+    --camera none \
+    --captures-dir ${STATE_DIRECTORY}/captures
+StateDirectory=launch-monitor
+# The daemon exits non-zero only on fatal errors (bad config, camera failure);
+# MCU unplugs are handled inside the process. SIGTERM disarms the strobe.
+Restart=always
+RestartSec=2
+TimeoutStopSec=15
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target

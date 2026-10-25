@@ -1,0 +1,5 @@
+# Stable name for the launch-monitor Pico (firmware/src/main.rs: pid.codes
+# test VID/PID 1209:0001, product "launch-monitor"). Survives replugging into
+# another port, so the daemon can use --mcu serial:/dev/launch-monitor-mcu.
+# Install: sudo cp 99-launch-monitor.rules /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="0001", ATTRS{product}=="launch-monitor", SYMLINK+="launch-monitor-mcu", GROUP="dialout", MODE="0660", ENV{ID_MM_DEVICE_IGNORE}="1"

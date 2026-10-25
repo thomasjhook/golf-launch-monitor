@@ -33,3 +33,17 @@ pub fn unix_ms_now() -> u64 {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
+
+/// Never delivers a frame. For bringing up the MCU link before a real camera
+/// backend exists: every shot is then reported as `ShotWithoutFrame`.
+pub struct NullCamera;
+
+impl Camera for NullCamera {
+    async fn set_exposure_us(&mut self, _us: u32) -> Result<()> {
+        Ok(())
+    }
+
+    async fn next_frame(&mut self) -> Result<CapturedFrame> {
+        std::future::pending().await
+    }
+}

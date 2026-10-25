@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use capture_daemon::camera::{Camera, CapturedFrame};
-use capture_daemon::daemon::{run, DaemonConfig, DaemonEvent};
-use capture_daemon::link::McuLink;
+use capture_daemon::daemon::{run, run_supervised, DaemonConfig, DaemonEvent, ReconnectPolicy};
+use capture_daemon::link::{LinkConnector, McuLink};
 use capture_daemon::service::{connect_lazy, install_bench_setup, RetryPolicy, ShotUploader};
 use capture_daemon::sim::{SimRig, SimRigConfig};
 use capture_daemon::Error;
@@ -481,6 +481,117 @@ async fn link_loss_is_a_fatal_error() {
         matches!(e, DaemonEvent::LinkError(_)).then_some(())
     })
     .await;
+}
+
+/// Yields scripted connect results in order, then fails like a missing device.
+struct ScriptedConnector(std::collections::VecDeque<capture_daemon::Result<McuLink<DuplexStream>>>);
+
+impl LinkConnector for ScriptedConnector {
+    type Io = DuplexStream;
+
+    async fn connect(&mut self) -> capture_daemon::Result<McuLink<DuplexStream>> {
+        self.0
+            .pop_front()
+            .unwrap_or_else(|| Err(Error::Io(std::io::Error::other("no such device"))))
+    }
+}
+
+#[tokio::test]
+async fn reconnects_and_rearms_after_link_loss() {
+    let first = SimRig::start(fast_rig());
+    let second = SimRig::start(fast_rig());
+    let connector = ScriptedConnector(
+        [
+            Err(Error::Io(std::io::Error::other("no such device"))),
+            Ok(first.link),
+            Ok(second.link),
+        ]
+        .into(),
+    );
+    let (_frames_tx, frames_rx) = mpsc::unbounded_channel();
+    let (ev_tx, mut events) = mpsc::unbounded_channel();
+    let (stop, stop_rx) = oneshot::channel::<()>();
+    let fast = ReconnectPolicy {
+        initial: Duration::from_millis(5),
+        max: Duration::from_millis(20),
+    };
+    let handle = tokio::spawn(run_supervised(
+        connector,
+        StubCamera(frames_rx),
+        dead_uploader(),
+        DaemonConfig::default(),
+        ev_tx,
+        async move {
+            let _ = stop_rx.await;
+        },
+        Some(fast),
+    ));
+
+    // The device is absent at first: failure, then a retry, then ready.
+    wait_for(&mut events, |e| {
+        matches!(e, DaemonEvent::LinkError(_)).then_some(())
+    })
+    .await;
+    wait_for(&mut events, |e| {
+        matches!(e, DaemonEvent::Reconnecting { attempt: 1, .. }).then_some(())
+    })
+    .await;
+    wait_for(&mut events, |e| {
+        matches!(e, DaemonEvent::Ready { .. }).then_some(())
+    })
+    .await;
+
+    // Unplug it: the daemon comes back on the next link and re-arms.
+    first.device.abort();
+    wait_for(&mut events, |e| {
+        matches!(e, DaemonEvent::LinkError(_)).then_some(())
+    })
+    .await;
+    wait_for(&mut events, |e| {
+        matches!(e, DaemonEvent::Reconnecting { attempt: 1, .. }).then_some(())
+    })
+    .await;
+    wait_for(&mut events, |e| {
+        matches!(e, DaemonEvent::Ready { .. }).then_some(())
+    })
+    .await;
+
+    // The new device really is armed: a hit produces a shot (no frame here).
+    second.golfer.hit(TRUTHS[0]).unwrap();
+    wait_for(&mut events, |e| {
+        matches!(e, DaemonEvent::ShotWithoutFrame { .. }).then_some(())
+    })
+    .await;
+
+    stop.send(()).unwrap();
+    handle.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn config_errors_stay_fatal_when_reconnecting() {
+    let (host, dev) = duplex(4096);
+    spawn_fake_device(
+        dev,
+        FakeDevice {
+            config_reply: DeviceToHost::ConfigRejected(ConfigError::PulseCount),
+            shot_after_arm: None,
+        },
+    );
+    let connector = ScriptedConnector([Ok(McuLink::new(host))].into());
+    let (_tx, frames_rx) = mpsc::unbounded_channel();
+    let (ev_tx, _events) = mpsc::unbounded_channel();
+    let err = run_supervised(
+        connector,
+        StubCamera(frames_rx),
+        dead_uploader(),
+        DaemonConfig::default(),
+        ev_tx,
+        std::future::pending::<()>(),
+        Some(ReconnectPolicy::default()),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, Error::ConfigRejected(_)), "{err}");
 }
 
 #[tokio::test]

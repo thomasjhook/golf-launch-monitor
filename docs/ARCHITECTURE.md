@@ -37,8 +37,10 @@ Done: service, Postgres persistence, app, simulated daemon, firmware (unproven o
 
 1. Real camera backend in `capture-daemon` (blocked on choosing a camera; see the
    hardware list). Must run on Linux aarch64.
-2. Real serial link to the Pico (`--mcu serial:PATH` is rejected today).
-3. MCU reconnect and daemon restart handling (systemd unit on the Pi).
+2. ~~Real serial link to the Pico~~ Written (`--mcu serial:PATH --camera none`),
+   unproven without the device.
+3. ~~MCU reconnect and daemon restart handling~~ Done in `run_supervised`; systemd
+   unit and udev rule in `deploy/systemd/` (untested on a Pi).
 4. Build/run `capture-daemon` for aarch64 Linux (build on the Pi, or cross-compile).
 5. Point the daemon at the Mac mini: `--service-addr http://<mac-mini>:8080`, and let
    the Mac mini's firewall accept port 8080 from the LAN.
