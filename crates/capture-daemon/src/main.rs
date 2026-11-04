@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use capture_daemon::camera::NullCamera;
+use capture_daemon::camera::{Camera, NullCamera, RpicamCamera, RpicamConfig};
 use capture_daemon::daemon::{run, run_supervised, DaemonConfig, DaemonEvent, ReconnectPolicy};
 use capture_daemon::link::SerialConnector;
 use capture_daemon::service::{connect_lazy, install_bench_setup, RetryPolicy, ShotUploader};
@@ -18,10 +18,22 @@ struct Cli {
     /// MCU backend: `sim` or `serial:/dev/cu.usbmodemXXXX`.
     #[arg(long, default_value = "sim")]
     mcu: String,
-    /// Camera backend: `sim`, or `none` (never delivers frames; for bringing
-    /// up a serial MCU before a real camera backend exists, see TODO).
+    /// Camera backend: `sim`, `rpicam` (CSI camera such as the InnoMaker
+    /// IMX296, via rpicam-vid), or `none` (never delivers frames).
     #[arg(long, default_value = "sim")]
     camera: String,
+    /// rpicam: executable to run.
+    #[arg(long, default_value = "rpicam-vid")]
+    rpicam_bin: String,
+    #[arg(long, default_value_t = 1456)]
+    cam_width: u32,
+    #[arg(long, default_value_t = 1088)]
+    cam_height: u32,
+    /// rpicam: bytes per row of the Y plane (defaults to --cam-width).
+    #[arg(long)]
+    cam_stride: Option<u32>,
+    #[arg(long, default_value_t = 1.0)]
+    cam_gain: f32,
     #[arg(
         long,
         env = "SHOT_SERVICE_ADDR",
@@ -113,17 +125,18 @@ async fn shutdown_signal() {
 async fn real_main(cli: Cli) -> Result<bool, String> {
     let mcu = parse_mcu(&cli.mcu)?;
     match (&mcu, cli.camera.as_str()) {
-        (McuKind::Sim, "sim") | (McuKind::Serial(_), "none") => {}
-        (McuKind::Sim, "none") => return Err("--camera none needs --mcu serial:<path>".into()),
+        (McuKind::Sim, "sim") | (McuKind::Serial(_), "none" | "rpicam") => {}
+        (McuKind::Sim, "none" | "rpicam") => {
+            return Err("--camera none/rpicam needs --mcu serial:<path>".into())
+        }
         (McuKind::Serial(_), "sim") => {
             return Err(
-                "--camera sim only works with --mcu sim; use --camera none until a real camera backend exists"
-                    .into(),
+                "--camera sim only works with --mcu sim; use --camera rpicam or none".into(),
             )
         }
         (_, other) => {
             return Err(format!(
-                "unsupported --camera {other:?}: expected `sim` or `none` (real camera backend is a TODO)"
+                "unsupported --camera {other:?}: expected `sim`, `rpicam` or `none`"
             ))
         }
     }
@@ -138,7 +151,18 @@ async fn real_main(cli: Cli) -> Result<bool, String> {
         .validate()
         .map_err(|e| format!("invalid strobe flags: {e:?}"))?;
     if let McuKind::Serial(path) = mcu {
-        return run_live(&cli, strobe, path).await;
+        return if cli.camera == "rpicam" {
+            let cam = RpicamCamera::new(RpicamConfig {
+                bin: cli.rpicam_bin.clone(),
+                width: cli.cam_width,
+                height: cli.cam_height,
+                stride: cli.cam_stride.unwrap_or(cli.cam_width),
+                gain: cli.cam_gain,
+            });
+            run_live(&cli, strobe, path, cam).await
+        } else {
+            run_live(&cli, strobe, path, NullCamera).await
+        };
     }
     let rig_cfg = SimRigConfig::default();
     let min_interval_ms = u64::from(rig_cfg.lockout_us) / 1000 + 20;
@@ -247,7 +271,12 @@ async fn real_main(cli: Cli) -> Result<bool, String> {
 
 /// Real MCU over serial: run until a shutdown signal, surviving unplugs and
 /// MCU resets. Only exits non-zero on fatal (non-link) errors.
-async fn run_live(cli: &Cli, strobe: StrobeConfig, path: String) -> Result<bool, String> {
+async fn run_live<C: Camera + 'static>(
+    cli: &Cli,
+    strobe: StrobeConfig,
+    path: String,
+    camera: C,
+) -> Result<bool, String> {
     let channel = connect_lazy(&cli.service_addr).map_err(|e| e.to_string())?;
     if cli.install_bench_setup {
         install_bench_setup(channel.clone(), RetryPolicy::default())
@@ -288,7 +317,7 @@ async fn run_live(cli: &Cli, strobe: StrobeConfig, path: String) -> Result<bool,
     tracing::info!(%path, "starting; waiting for MCU");
     let res = run_supervised(
         SerialConnector::new(path),
-        NullCamera,
+        camera,
         uploader,
         cfg,
         ev_tx,

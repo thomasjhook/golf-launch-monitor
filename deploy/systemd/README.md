@@ -25,3 +25,21 @@ Behaviour:
 
 Untested on hardware: the unit, the udev rule and the serial path have only
 been exercised against the simulator and a missing device.
+
+## Camera (InnoMaker IMX296, `--camera rpicam`)
+
+UNVERIFIED on hardware; do these on the Pi, in order:
+
+1. `/boot/firmware/config.txt`: `camera_auto_detect=0` and `dtoverlay=imx296`
+   (add `,cam0` on a Pi 5's CAM0 port), then reboot.
+2. `rpicam-still --list-cameras` must list the IMX296.
+3. External trigger mode: `echo "options imx296 trigger_mode=1" | sudo tee
+   /etc/modprobe.d/imx296.conf`, reboot. Check the InnoMaker manual for the
+   trigger polarity/edge and whether exposure follows `--shutter` or the
+   trigger pulse width; see firmware/README.md "Camera configuration".
+4. Grab one frame by hand and check the size, to confirm the Y-plane stride:
+   `rpicam-vid -n -t 1000 --codec yuv420 --width 1456 --height 1088 --shutter 3000 -o /tmp/f.yuv`
+   (a triggered camera only writes frames when triggered). Bytes per frame should be
+   `1456*1088*1.5 = 2376192`; if it is larger, rpicam pads rows, so pass
+   `--cam-stride <padded width>`.
+5. Change `--camera none` to `--camera rpicam` in capture-daemon.service.

@@ -3,8 +3,8 @@
 //! Real hardware is not available yet; `sim` provides a device running the
 //! real firmware `Sequencer` and a synthetic camera that exercise the same
 //! code paths. `run_supervised` reconnects and re-arms after MCU link loss.
-//! Known limitations: no real camera backend (`Camera` is the seam), and
-//! `link::connect_serial` is untested without a device.
+//! `camera::RpicamCamera` drives a CSI camera through `rpicam-vid` (untested
+//! on real hardware); `link::connect_serial` was verified on a Pico 2.
 
 pub mod camera;
 pub mod daemon;
