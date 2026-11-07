@@ -10,13 +10,15 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 User=launchmonitor
-SupplementaryGroups=dialout
+SupplementaryGroups=dialout video
 EnvironmentFile=/etc/launch-monitor/capture-daemon.env
-# --camera none until a real camera backend exists: shots show up as
-# "shot without frame". Captures are archived under StateDirectory.
+# --camera rpicam: CSI camera via rpicam-vid. --cam-stride 1472 is the padded
+# row length rpicam uses for 1456-wide frames (verified on hardware).
+# Captures are archived under StateDirectory.
 ExecStart=/usr/local/bin/capture-daemon \
     --mcu serial:/dev/launch-monitor-mcu \
-    --camera none \
+    --camera rpicam \
+    --cam-stride 1472 \
     --captures-dir ${STATE_DIRECTORY}/captures
 StateDirectory=launch-monitor
 # The daemon exits non-zero only on fatal errors (bad config, camera failure);
